@@ -19,6 +19,7 @@ from trademaster.utils import get_attr, GeneralReplayBuffer, get_optim_param
 class PortfolioManagementEIIE(AgentBase):
     def __init__(self, **kwargs):
         super(PortfolioManagementEIIE, self).__init__()
+        """EIIE agent wrapper: holds policy/critic and update logic."""
 
         self.num_envs = int(get_attr(kwargs, "num_envs", 1))
         self.device = get_attr(kwargs, "device", torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu"))
@@ -39,7 +40,8 @@ class PortfolioManagementEIIE(AgentBase):
                                         0)  # the tau of soft target update `net = (1-tau)*net + net1`
         self.state_value_tau = get_attr(kwargs, "state_value_tau", 5e-3)  # the tau of normalize for value and state
 
-        self.last_state = None  # last state of the trajectory for training. last_state.shape == (num_envs, state_dim)
+        # Cached last state to start exploration from
+        self.last_state = None  # last_state.shape == (num_envs, state_dim)
 
         self.act = get_attr(kwargs, "act", None).to(self.device)
         self.cri = get_attr(kwargs, "cri", None).to(self.device)
@@ -51,6 +53,7 @@ class PortfolioManagementEIIE(AgentBase):
         self.transition = get_attr(kwargs, "transition", namedtuple("Transition", ['state','action','reward','undone','next_state']))
 
     def get_save(self):
+        """Return dict of models/optimizers for checkpointing."""
         models = {
             "act":self.act,
             "cri":self.cri
@@ -66,6 +69,10 @@ class PortfolioManagementEIIE(AgentBase):
         return res
 
     def explore_env(self, env, horizon_len: int) -> Tuple[Tensor, ...]:
+        """
+        Roll out the policy in the environment for horizon_len steps,
+        collecting transitions into a fixed-shape buffer.
+        """
         states = torch.zeros((horizon_len,
                               self.num_envs,
                               self.action_dim,
@@ -80,6 +87,7 @@ class PortfolioManagementEIIE(AgentBase):
                                    self.time_steps,
                                    self.state_dim), dtype=torch.float32).to(self.device)
 
+        # Start from the last known state to keep trajectories contiguous
         state = self.last_state  # last_state.shape = (state_dim, ) for a single env.
         get_action = self.act
         for t in range(horizon_len):
@@ -87,6 +95,7 @@ class PortfolioManagementEIIE(AgentBase):
             states[t] = state
 
             ary_action = action[0].detach().cpu().numpy()
+            # Step environment; env returns next_state, reward, done
             ary_state, reward, done, _ = env.step(ary_action)  # next_state
             state = torch.as_tensor(env.reset() if done else ary_state, dtype=torch.float32, device=self.device)
             actions[t] = action
@@ -96,6 +105,7 @@ class PortfolioManagementEIIE(AgentBase):
 
         self.last_state = state
 
+        # Scale rewards to a numerically stable range
         rewards *= self.reward_scale
         undones = 1.0 - dones.type(torch.float32)
 
@@ -109,6 +119,7 @@ class PortfolioManagementEIIE(AgentBase):
         return transition
 
     def update_net(self, buffer: GeneralReplayBuffer):
+        """Update actor/critic using samples from replay buffer."""
         obj_critics = 0.0
         obj_actors = 0.0
         update_times = int(buffer.add_size * self.repeat_times)
@@ -134,6 +145,7 @@ class PortfolioManagementEIIE(AgentBase):
         undone = transition.undone
         next_state = transition.next_state
 
+        # Actor update: maximize critic output
         a = self.act(state)
         q = self.cri(state, a)
         a_loss = -torch.mean(q)
@@ -142,6 +154,7 @@ class PortfolioManagementEIIE(AgentBase):
         a_loss.backward()
         self.act_optimizer.step()
 
+        # Critic update: TD target
         a_ = self.act(next_state)
         q_ = self.cri(next_state, a_.detach())
         q_target = reward + self.gamma * q_

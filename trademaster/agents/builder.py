@@ -5,6 +5,7 @@ import copy
 AGENTS = Registry('agent')
 
 def build_agent(cfg, default_args = None):
+    """Build agent instance from cfg.agent using the AGENTS registry."""
     cp_cfg = copy.deepcopy(cfg.agent)
     agent = build_from_cfg(cp_cfg, AGENTS, default_args)
     return agent

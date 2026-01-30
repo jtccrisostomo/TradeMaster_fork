@@ -14,6 +14,7 @@ class EIIEConv(Net):
                  kernel_size = 3,
                  dims = (32, )):
         super(EIIEConv, self).__init__()
+        """Policy network: conv over tech indicators/time, outputs portfolio weights."""
 
         self.kernel_size = kernel_size
         self.time_steps = time_steps
@@ -25,12 +26,14 @@ class EIIEConv(Net):
         self.para = torch.nn.Parameter(torch.ones(1).requires_grad_())
 
     def forward(self, x): # (batch_size, num_seqs, action_dim, time_steps, state_dim)
+        """Return normalized weights for assets + cash."""
         if len(x.shape) > 4:
             x = x.squeeze(1)
         x = x.permute(0, 3, 1, 2)
         x = self.net(x)
         x = x.view(x.shape[0], -1)
 
+        # Append a learnable cash bias term
         para = self.para.repeat(x.shape[0], 1)
         x = torch.cat((x, para), dim=1)
         x = torch.softmax(x, dim=1)
@@ -47,6 +50,7 @@ class EIIECritic(Net):
                  hidden_size = 32,
                  ):
         super(EIIECritic, self).__init__()
+        """Critic network: LSTM over time to score actions."""
 
         self.time_steps = time_steps
 
@@ -60,6 +64,7 @@ class EIIECritic(Net):
         self.para = torch.nn.Parameter(torch.ones(1).requires_grad_())
 
     def forward(self, x, a):
+        """Estimate value/Q given state x and action a."""
         if len(x.shape) >= 4:
             x = x.view(x.shape[0], x.shape[1], -1)
         lstm_out, _ = self.lstm(x)
@@ -70,6 +75,7 @@ class EIIECritic(Net):
         x = x.view(x.shape[0], -1)
         para = self.para.repeat(x.shape[0], 1)
 
+        # Concatenate latent features, cash bias, and action
         x = torch.cat((x, para, a), dim=1)
         # x = self.linear2(x)
         x = x.mean(dim = 1, keepdim=True)

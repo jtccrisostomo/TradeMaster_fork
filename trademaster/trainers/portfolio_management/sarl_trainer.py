@@ -46,7 +46,7 @@ def select_algorithms(alg_name):
 
 logging.disable(logging.INFO)
 logging.disable(logging.WARNING)
-ray.init(ignore_reinit_error=True)
+#ray.init(ignore_reinit_error=True)
 register_env("portfolio_management_sarl", lambda config: env_creator("portfolio_management_sarl")(config))
 
 

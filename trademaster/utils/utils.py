@@ -2,6 +2,7 @@ import inspect
 import os
 import re
 
+import math
 import mmcv
 from mmcv import Config
 from mmcv.utils import Registry
@@ -13,13 +14,21 @@ import torch
 import plotly.graph_objects as go
 import os.path as osp
 import pickle
-from scipy.stats import norm
+try:
+    from scipy.stats import norm
+except Exception:  # pragma: no cover - optional SciPy dependency
+    class _FallbackNormal:
+        @staticmethod
+        def cdf(x: float) -> float:
+            return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+    norm = _FallbackNormal()  # type: ignore
 from argparse import Namespace
 from collections import OrderedDict
 import matplotlib.pyplot as plt
 import pandas as pd
 
 def set_seed(random_seed):
+    """Set python/numpy/torch seeds for reproducibility."""
     random.seed(random_seed)
     torch.cuda.manual_seed(random_seed)
     torch.cuda.manual_seed_all(random_seed)
@@ -67,6 +76,10 @@ def reduce_mem_usage(df, verbose=True):
 
 
 def get_attr(args, key=None, default_value=None):
+    """
+    Safe attribute/dict getter used across configs and builders.
+    Supports both dict-style and attribute-style access.
+    """
     if isinstance(args, dict):
         return args[key] if key in args else default_value
     elif isinstance(args, object):
@@ -74,6 +87,10 @@ def get_attr(args, key=None, default_value=None):
 
 
 def build_from_cfg(cfg, registry, default_args=None):
+    """
+    Instantiate an object from a config dict and a Registry.
+    This is the core factory used by all builder.py modules.
+    """
     """Build a module from config dict.
 
     Args:
@@ -155,6 +172,10 @@ def update_data_root(cfg, logger=None):
 
 
 def replace_cfg_vals(ori_cfg):
+    """
+    Replace ${var} placeholders in config values with actual values.
+    Ensures composed configs are fully resolved before building.
+    """
     """Replace the string "${key}" with the corresponding value.
 
     Replace the "${key}" with the value of ori_cfg.key in the config. And
@@ -596,5 +617,3 @@ def plot_log_trading_decision_on_market(market_features_dict, trading_points, al
         plt.savefig(osp.join(save_dir,f"Visualization_{task}.png"))
         # save the trading_log
         trading_log.to_csv(osp.join(save_dir,f"trading_log_{task}.csv"))
-
-

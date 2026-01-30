@@ -5,6 +5,7 @@ import copy
 OPTIMIZERS = Registry('optimizer')
 
 def build_optimizer(cfg, default_args=None):
+    """Build optimizer from cfg.optimizer using OPTIMIZERS registry."""
     cp_cfg = copy.deepcopy(cfg.optimizer)
     optimizer = build_from_cfg(cp_cfg, OPTIMIZERS, default_args)
     return optimizer

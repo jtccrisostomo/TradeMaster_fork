@@ -16,11 +16,11 @@ _base_ = [
 
 data = dict(
     type = "PortfolioManagementDataset",
-    data_path = "data/portfolio_management/exchange",
-    train_path = "data/portfolio_management/exchange/train.csv",
-    valid_path = "data/portfolio_management/exchange/valid.csv",
-    test_path = "data/portfolio_management/exchange/test.csv",
-    test_dynamic_path='data/portfolio_management/exchange/test_labeled_3_24_-0.05_0.05.csv',
+    data_path = "/mnt/lustre/erdtlstr/home/laperia/TradeMaster/data/portfolio_management/exchange",
+    train_path = "/mnt/lustre/erdtlstr/home/laperia/TradeMaster/data/portfolio_management/exchange/train.csv",
+    valid_path = "/mnt/lustre/erdtlstr/home/laperia/TradeMaster/data/portfolio_management/exchange/valid.csv",
+    test_path = "/mnt/lustre/erdtlstr/home/laperia/TradeMaster/data/portfolio_management/exchange/test.csv",
+    test_dynamic_path="/mnt/lustre/erdtlstr/home/laperia/TradeMaster/data/portfolio_management/exchange/test_labeled_3_24_-0.05_0.05.csv",
     tech_indicator_list = [
         "zopen",
         "zhigh",

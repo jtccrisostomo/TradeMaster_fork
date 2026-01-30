@@ -20,9 +20,15 @@ from .misc import load_object
 from .replay_buffer import ReplayBuffer
 from .replay_buffer import ReplayBufferHFT
 from .general_replay_buffer import GeneralReplayBuffer
-from .labeling_util import *
+try:
+    from .labeling_util import *  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    pass
 from .utils import set_seed
 from .utils import plot
 from .utils import plot_metric_against_baseline
 from .utils import plot_log_trading_decision_on_market
-from .market_dynamics_modeling_analysis import *
+try:
+    from .market_dynamics_modeling_analysis import *  # type: ignore
+except Exception:  # pragma: no cover
+    pass

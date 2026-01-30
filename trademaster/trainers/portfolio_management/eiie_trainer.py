@@ -19,6 +19,7 @@ from collections import OrderedDict
 class PortfolioManagementEIIETrainer(Trainer):
     def __init__(self, **kwargs):
         super(PortfolioManagementEIIETrainer, self).__init__()
+        """Trainer manages training/validation/test loops and checkpointing."""
 
         self.num_envs = int(get_attr(kwargs, "num_envs", 1))
         self.device = get_attr(kwargs, "device", None)
@@ -28,6 +29,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         self.valid_environment = get_attr(kwargs, "valid_environment", None)
         self.test_environment = get_attr(kwargs, "test_environment", None)
         self.agent = get_attr(kwargs, "agent", None)
+        # All outputs are stored under work_dir/checkpoints
         self.work_dir = get_attr(kwargs, "work_dir", None)
         self.work_dir = os.path.join(ROOT, self.work_dir)
         self.seeds_list = get_attr(kwargs, "seeds_list", (12345,))
@@ -74,6 +76,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         self.init_before_training()
 
     def init_before_training(self):
+        """Set seeds, create output dirs, and configure checkpoints."""
         random.seed(self.random_seed)
         torch.cuda.manual_seed(self.random_seed)
         torch.cuda.manual_seed_all(self.random_seed)
@@ -102,6 +105,7 @@ class PortfolioManagementEIIETrainer(Trainer):
             os.makedirs(self.checkpoints_path, exist_ok=True)
 
     def train_and_valid(self):
+        """Main training loop with periodic validation and best-model selection."""
 
         '''init agent.last_state'''
         state = self.train_environment.reset()
@@ -136,6 +140,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         epoch = 1
         print("Train Episode: [{}/{}]".format(epoch, self.epochs))
         while True:
+            # Collect fresh transitions
             buffer_items = self.agent.explore_env(self.train_environment, self.horizon_len)
             if self.if_off_policy:
                 buffer.update(buffer_items)
@@ -148,6 +153,7 @@ class PortfolioManagementEIIETrainer(Trainer):
 
             if torch.mean(buffer_items.undone) < 1.0:
                 print("Valid Episode: [{}/{}]".format(epoch, self.epochs))
+                # Run one validation episode
                 state = self.valid_environment.reset()
                 episode_reward_sum = 0.0  # sum of rewards in an episode
                 get_action = self.agent.act
@@ -165,6 +171,7 @@ class PortfolioManagementEIIETrainer(Trainer):
                 valid_score_list.append(episode_reward_sum)
                 save_dict_list.append(save_dict)
 
+                # Save checkpoint each validation epoch
                 save_model(self.checkpoints_path,
                            epoch=epoch,
                            save=self.agent.get_save())
@@ -175,6 +182,7 @@ class PortfolioManagementEIIETrainer(Trainer):
             if epoch > self.epochs:
                 break
 
+        # Select best epoch by validation reward
         max_index = np.argmax(valid_score_list)
         plot_metric_against_baseline(total_asset=save_dict_list[max_index]['total_assets'],
                                      buy_and_hold=None, alg='Ensemble of Identical Independent Evaluators',
@@ -189,6 +197,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         )
 
     def test(self):
+        """Run test episode with the best checkpoint and dump metrics."""
         load_best_model(self.checkpoints_path, save=self.agent.get_save(), is_train=False)
 
         print("Test Best Episode")

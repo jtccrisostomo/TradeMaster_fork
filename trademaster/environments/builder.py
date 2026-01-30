@@ -4,6 +4,7 @@ import copy
 
 ENVIRONMENTS = Registry('environment')
 def build_environment(cfg, default_args=None):
+    """Build environment instance from cfg.environment using ENVIRONMENTS registry."""
     cp_cfg = copy.deepcopy(cfg.environment)
     environment = build_from_cfg(cp_cfg, ENVIRONMENTS, default_args)
     return environment

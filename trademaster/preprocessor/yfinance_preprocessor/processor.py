@@ -76,6 +76,21 @@ class YfinancePreprocessor(CustomPreprocessor):
         return df
 
     def make_feature(self):
+        # [ADDED] Normalize columns before computing z* features
+        # - Drop duplicate column names (keep first)
+        # - If MultiIndex columns appear, flatten them
+        import pandas as _pd
+        if isinstance(self.df.columns, _pd.MultiIndex):
+            self.df.columns = self.df.columns.map(lambda t: "_".join(map(str, t)).strip("_"))
+        # After flattening, drop duplicate names (keep the first)
+        if _pd.Index(self.df.columns).has_duplicates:
+            self.df = self.df.loc[:, ~_pd.Index(self.df.columns).duplicated()]
+
+        # [ADDED] Drop duplicate-named columns created by merges/pivots
+        try:
+            self.df = self.df.loc[:, ~self.df.columns.duplicated()]
+        except Exception:
+            pass
         self.df["zopen"] = self.df["open"] / self.df["close"] - 1
         self.df["zhigh"] = self.df["high"] / self.df["close"] - 1
         self.df["zlow"] = self.df["low"] / self.df["close"] - 1

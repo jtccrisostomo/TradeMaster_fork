@@ -2,251 +2,286 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-
-ROOT = str(Path(__file__).resolve().parents[2])
-sys.path.append(ROOT)
 import numpy as np
-from trademaster.utils import get_attr, print_metrics
 import pandas as pd
+from collections import OrderedDict
+
+# Make sure repo code is importable
+ROOT = str(Path(__file__).resolve().parents[2])
+if ROOT not in sys.path:
+    sys.path.append(ROOT)
+
+from trademaster.utils import get_attr, print_metrics
 from ..custom import Environments
 from ..builder import ENVIRONMENTS
-from gym import spaces
-from collections import OrderedDict
-"""this environment is based on https://github.com/AI4Finance-Foundation/FinRL/blob/master/finrl/meta/env_portfolio_allocation/env_portfolio.py but 
-adding 2 additional features and 1 modification:
-Additional features
-1) we consider the weights difference due to price variation and calculates the commission fee based this weights difference.
-2) we consider the cash term which allow the agents to keep its assets safe when the market is risky
-Modification:
-we remove the covarriance term in the state because it does not fit our algorithms
+from gymnasium import spaces  # gymnasium-compatible spaces
+
+
 """
+Environment based on FinRL's portfolio allocation env, with fixes:
+- Maintain a fixed, sorted ticker universe across all steps.
+- Reindex each day's frame to that universe and fill missing tickers
+  with previous day's prices so shapes always match.
+- Keep the classic Gym API (reset -> obs, step -> obs, reward, done, info);
+  your trainer wraps with EnvCompatibility already.
+"""
+
 
 @ENVIRONMENTS.register_module()
 class PortfolioManagementEnvironment(Environments):
     def __init__(self, config):
-        super(PortfolioManagementEnvironment, self).__init__()
+        super().__init__()
+
         self.dataset = get_attr(config, "dataset", None)
         self.task = get_attr(config, "task", "train")
         self.day = 0
-        self.df_path = None
+
+        # Paths from dataset cfg
         if self.task.startswith("train"):
-            self.df_path = get_attr(self.dataset, "train_path", None)
+            df_path = get_attr(self.dataset, "train_path", None)
         elif self.task.startswith("valid"):
-            self.df_path = get_attr(self.dataset, "valid_path", None)
+            df_path = get_attr(self.dataset, "valid_path", None)
         else:
-            self.df_path = get_attr(self.dataset, "test_path", None)
+            df_path = get_attr(self.dataset, "test_path", None)
 
         self.initial_amount = get_attr(self.dataset, "initial_amount", 100000)
         self.transaction_cost_pct = get_attr(self.dataset, "transaction_cost_pct", 0.001)
         self.tech_indicator_list = get_attr(self.dataset, "tech_indicator_list", [])
 
+        # Load CSV. Keep the original integer "day" index (first column).
         if self.task.startswith("test_dynamic"):
             dynamics_test_path = get_attr(config, "dynamics_test_path", None)
             self.df = pd.read_csv(dynamics_test_path, index_col=0)
         else:
-            self.df = pd.read_csv(self.df_path, index_col=0)
-        self.stock_dim = len(self.df.tic.unique())
+            self.df = pd.read_csv(df_path, index_col=0)
+        # ---- Enforce consistent ticker universe across splits ----
+        tickers = getattr(self.dataset, "ticker_universe", None)
+        if tickers:
+            self.df = self.df[self.df["tic"].astype(str).isin(set(map(str, tickers)))].copy()
+
+        # It helps to keep rows ordered deterministically
+        if "date" in self.df.columns and "tic" in self.df.columns:
+            self.df.sort_values(["date", "tic"], inplace=True)
+
+
+        # Stable universe + shapes
+        self.tickers = sorted(self.df["tic"].unique().tolist())
+        self.stock_dim = len(self.tickers)
         self.state_space_shape = self.stock_dim
-        self.action_space_shape = self.stock_dim + 1
+        self.action_space_shape = self.stock_dim + 1  # cash + assets
 
-        self.action_space = spaces.Box(low=-5,
-                                       high=5,
-                                       shape=(self.action_space_shape,))
+        self.action_space = spaces.Box(low=-5.0, high=5.0, shape=(self.action_space_shape,), dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(len(self.tech_indicator_list),
-                   self.state_space_shape))
+            low=-np.inf, high=np.inf,
+            shape=(len(self.tech_indicator_list), self.state_space_shape),
+            dtype=np.float32,
+        )
 
-        self.data = self.df.loc[self.day, :]
-        # initially, the self.state's shape is stock_dim*len(tech_indicator_list)
-        self.state = np.array([
-            self.data[tech].values.tolist()
-            for tech in self.tech_indicator_list
-        ])
+        # Initialize per-day view and last prices
+        self._cur_day_df = self._day_slice(self.day)  # reindexed to self.tickers
+        self.last_prices = self._cur_day_df["close"].astype(float).to_numpy()
 
+        self.state = self._build_state_from_day_df(self._cur_day_df)
         self.terminal = False
         self.portfolio_value = self.initial_amount
         self.asset_memory = [self.initial_amount]
-        self.portfolio_return_memory = [0]
-        self.weights_memory = [[1] + [0] * self.stock_dim]
-        self.date_memory = [self.data.date.unique()[0]]
+        self.portfolio_return_memory = [0.0]
+        self.weights_memory = [[1.0] + [0.0] * self.stock_dim]
+        self.date_memory = [self._day_date(self.day)]
         self.transaction_cost_memory = []
 
+    # ---------- helpers ----------
+
+    def _raw_day_df(self, day: int) -> pd.DataFrame:
+        """Return the raw slice for a day (may be Series if only 1 row)."""
+        sl = self.df.loc[day, :]
+        if isinstance(sl, pd.Series):
+            sl = sl.to_frame().T
+        return sl
+
+    def _day_slice(self, day: int) -> pd.DataFrame:
+        """
+        Return a DataFrame indexed by 'tic' and reindexed to the full ticker universe.
+        Columns must include all tech indicators + 'close' and 'date'.
+        Missing tickers (not trading this day) get NaNs to be filled later.
+        """
+        sl = self._raw_day_df(day)
+        sl = sl.set_index("tic").reindex(self.tickers)
+        return sl
+
+    def _day_date(self, day: int):
+        sl = self._raw_day_df(day)
+        return sl["date"].iloc[0] if "date" in sl.columns else day
+
+    def _build_state_from_day_df(self, day_df: pd.DataFrame) -> np.ndarray:
+        # Ensure required cols exist
+        need = set(self.tech_indicator_list)
+        missing = [c for c in need if c not in day_df.columns]
+        if missing:
+            # Create missing cols filled with zeros
+            for c in missing:
+                day_df[c] = 0.0
+
+        # Fill NaNs (e.g., missing tickers) with previous known values where possible,
+        # otherwise zeros so obs always has a value.
+        feat = day_df[self.tech_indicator_list].copy()
+        feat = feat.fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+
+        # Shape: (len(features), stock_dim)
+        state = np.vstack([feat[c].astype(float).to_numpy() for c in self.tech_indicator_list])
+        return state
+
+    @staticmethod
+    def _softmax(actions: np.ndarray) -> np.ndarray:
+        a = actions - np.max(actions)  # numerical stability
+        e = np.exp(a)
+        return e / (np.sum(e) + 1e-12)
+
+    @staticmethod
+    def _normalize(weights_like: list | np.ndarray) -> np.ndarray:
+        w = np.asarray(weights_like, dtype=float)
+        s = np.sum(w)
+        return w / (s + 1e-12)
+
+    # ---------- gym API ----------
 
     def reset(self):
         self.asset_memory = [self.initial_amount]
-        self.day = 0
-        self.data = self.df.loc[self.day, :]
-
-        self.state = [
-            self.data[tech].values.tolist()
-            for tech in self.tech_indicator_list
-        ]
-        self.state = np.array(self.state)
-        self.portfolio_value = self.initial_amount
-        self.portfolio_return_memory = [0]
-
-        self.terminal = False
-        self.weights_memory = [[1] + [0] * self.stock_dim]
-        self.date_memory = [self.data.date.unique()[0]]
+        self.portfolio_return_memory = [0.0]
         self.transaction_cost_memory = []
+        self.weights_memory = [[1.0] + [0.0] * self.stock_dim]
+
+        self.day = 0
+        self._cur_day_df = self._day_slice(self.day)
+        # If first day has NaNs for some tickers, set them to 0 in obs but
+        # keep last_prices from available data.
+        close0 = self._cur_day_df["close"].astype(float)
+        # Any NaNs in first close -> fill with mean of available closes to initialize
+        init_close = close0.fillna(close0.mean()).to_numpy()
+        self.last_prices = init_close
+
+        self.portfolio_value = self.initial_amount
+        self.terminal = False
+        self.date_memory = [self._day_date(self.day)]
+
+        self.state = self._build_state_from_day_df(self._cur_day_df)
         return self.state
 
     def step(self, actions):
-        # make judgement about whether our data is running out
-        self.terminal = self.day >= len(self.df.index.unique()) - 1
-        actions = np.array(actions)
-
-        if self.terminal:
+        # If at end, finish episode
+        if self.day >= self.df.index.max():
             tr, sharpe_ratio, vol, mdd, cr, sor = self.analysis_result()
-            stats = OrderedDict(
-                {
-                    "Total Return": ["{:04f}%".format(tr * 100)],
-                    "Sharp Ratio": ["{:04f}".format(sharpe_ratio)],
-                    "Volatility": ["{:04f}%".format(vol*100)],
-                    "Max Drawdown": ["{:04f}%".format(mdd*100)],
-                    # "Calmar Ratio": ["{:04f}".format(cr)],
-                    # "Sortino Ratio": ["{:04f}".format(sor)],
-                }
-            )
-            table = print_metrics(stats)
-            # print(table)
+            table = print_metrics(OrderedDict({
+                "Total Return": [f"{tr*100:0.4f}%"],
+                "Sharp Ratio":  [f"{sharpe_ratio:0.4f}"],
+                "Volatility":   [f"{vol*100:0.4f}%"],
+                "Max Drawdown": [f"{mdd*100:0.4f}%"],
+            }))
             df_value = self.save_asset_memory()
             assets = df_value["total assets"].values
-            return self.state, self.reward, self.terminal, {
-                "sharpe_ratio": sharpe_ratio,
-                'total_assets': assets,
-                'table': table
-            }
+            info = {"sharpe_ratio": sharpe_ratio, "total_assets": assets, "table": table}
+            return self.state, 0.0, True, info
 
-        else:
-            # transfer actino into portofolios weights
-            weights = self.softmax(actions)
-            self.weights_memory.append(weights)
-            last_day_memory = self.data
+        # Convert action -> weights (cash + assets)
+        actions = np.array(actions, dtype=float).reshape(-1)
+        weights = self._softmax(actions)
+        # Enforce shape
+        if weights.shape[0] != self.action_space_shape:
+            raise ValueError(f"Expected {self.action_space_shape} weights (cash+{self.stock_dim}), got {weights.shape[0]}")
 
-            # step into the next time stamp
-            self.day += 1
-            self.data = self.df.loc[self.day, :]
-            # get the state
-            self.state = np.array([
-                self.data[tech].values.tolist()
-                for tech in self.tech_indicator_list
-            ])
-            self.state = np.array(self.state)
+        self.weights_memory.append(weights.tolist())
 
-            # get the portfolio return and the new weights(after one day's price variation, the weights will be a little different from
-            # the weights when the action is first posed)
-            portfolio_weights = weights[1:]
-            portfolio_return = sum(
-                ((self.data.close.values / last_day_memory.close.values) - 1) *
-                portfolio_weights)
-            weights_brandnew = self.normalization([weights[0]] + list(
-                np.array(weights[1:]) * np.array(
-                    (self.data.close.values / last_day_memory.close.values))))
-            self.weights_memory.append(weights_brandnew)
+        # Advance day
+        last_close = self.last_prices  # shape (stock_dim,)
+        last_day_df = self._cur_day_df
 
-            # caculate the transcation fee(there could exist an error of about 0.1% when calculating)
-            weights_old = (self.weights_memory[-3])
-            weights_new = (self.weights_memory[-2])
+        self.day += 1
+        self._cur_day_df = self._day_slice(self.day)
 
-            diff_weights = np.sum(
-                np.abs(np.array(weights_old) - np.array(weights_new)))
-            transcationfee = diff_weights * self.transaction_cost_pct * self.portfolio_value
+        # Current closes aligned to universe; missing tickers -> use last_close (ratio 1.0)
+        cur_close_raw = self._cur_day_df["close"].astype(float).to_numpy()
+        cur_close = np.where(np.isnan(cur_close_raw), last_close, cur_close_raw)
 
-            # calculate the overal result
-            new_portfolio_value = (self.portfolio_value -
-                                   transcationfee) * (1 + portfolio_return)
-            portfolio_return = (new_portfolio_value -
-                                self.portfolio_value) / self.portfolio_value
-            self.reward = new_portfolio_value - self.portfolio_value
-            self.portfolio_value = new_portfolio_value
+        # Per-asset simple returns for the day
+        price_rel = cur_close / (last_close + 1e-12)           # shape (stock_dim,)
+        per_asset_ret = price_rel - 1.0
 
-            self.portfolio_return_memory.append(portfolio_return)
-            self.date_memory.append(self.data.date.unique()[0])
-            self.asset_memory.append(new_portfolio_value)
+        # Portfolio return (exclude cash first element)
+        portfolio_weights = weights[1:]
+        portfolio_return = float(np.dot(per_asset_ret, portfolio_weights))
 
-            self.reward = self.reward
+        # New weights after market movement (pre-rebalancing drift)
+        drifted = np.array([weights[0]] + list(portfolio_weights * price_rel))
+        weights_brandnew = self._normalize(drifted).tolist()
+        self.weights_memory.append(weights_brandnew)
 
-        return self.state, self.reward, self.terminal, {}
+        # Transaction cost on weight change
+        w_old = np.array(self.weights_memory[-3], dtype=float)
+        w_new = np.array(self.weights_memory[-2], dtype=float)
+        diff_weights = float(np.sum(np.abs(w_old - w_new)))
+        fee = diff_weights * self.transaction_cost_pct * self.portfolio_value
 
-    def normalization(self, actions):
-        # a normalization function not only for actions to transfer into weights but also for the weights of the
-        # portfolios whose prices have been changed through time
-        actions = np.array(actions)
-        sum = np.sum(actions)
-        actions = actions / sum
-        return actions
+        # Portfolio value update
+        new_value = (self.portfolio_value - fee) * (1.0 + portfolio_return)
+        reward = new_value - self.portfolio_value
+        self.portfolio_value = new_value
 
-    def softmax(self, actions):
-        numerator = np.exp(actions)
-        denominator = np.sum(np.exp(actions))
-        softmax_output = numerator / denominator
-        return softmax_output
+        # Bookkeeping
+        self.portfolio_return_memory.append((new_value / (self.asset_memory[-1] + 1e-12)) - 1.0)
+        self.asset_memory.append(new_value)
+        self.date_memory.append(self._day_date(self.day))
+        self.transaction_cost_memory.append(fee)
+        self.last_prices = cur_close  # update for next step
+
+        # Next observation
+        self.state = self._build_state_from_day_df(self._cur_day_df)
+
+        return self.state, reward, False, {}
+
+    # ---------- reporting ----------
 
     def save_portfolio_return_memory(self):
-        # a record of return for each time stamp
-        date_list = self.date_memory
-        df_date = pd.DataFrame(date_list)
-        df_date.columns = ['date']
-
-        return_list = self.portfolio_return_memory
-        df_return = pd.DataFrame(return_list)
-        df_return.columns = ["daily_return"]
-        df_return.index = df_date.date
-
-        return df_return
+        df = pd.DataFrame({"date": self.date_memory, "daily_return": self.portfolio_return_memory})
+        df.set_index("date", inplace=True)
+        return df
 
     def save_asset_memory(self):
-        # a record of asset values for each time stamp
-        date_list = self.date_memory
-        df_date = pd.DataFrame(date_list)
-        df_date.columns = ['date']
+        df = pd.DataFrame({"date": self.date_memory, "total assets": self.asset_memory})
+        df.set_index("date", inplace=True)
+        return df
 
-        assets_list = self.asset_memory
-        df_value = pd.DataFrame(assets_list)
-        df_value.columns = ["total assets"]
-        df_value.index = df_date.date
+    def get_daily_return_rate(self, price_list: list[float]):
+        return [(price_list[i + 1] / price_list[i]) - 1.0 for i in range(len(price_list) - 1)]
 
-        return df_value
+    def evaualte(self, df: pd.DataFrame):
+        daily_return = df["daily_return"].values
+        assets = df["total assets"].values
+        tr = assets[-1] / (assets[0] + 1e-10) - 1.0
+
+        # Risk metrics
+        ret_rate = self.get_daily_return_rate(assets)
+        sharpe = np.mean(ret_rate) * (252 ** 0.5) / (np.std(ret_rate) + 1e-10)
+        vol = np.std(ret_rate)
+
+        peak = assets[0]
+        mdd = 0.0
+        for v in assets:
+            if v > peak:
+                peak = v
+            dd = (peak - v) / (peak + 1e-12)
+            if dd > mdd:
+                mdd = dd
+
+        neg = daily_return[daily_return < 0]
+        cr = np.sum(daily_return) / (mdd + 1e-10)
+        sor = np.sum(daily_return) / (np.nan_to_num(np.std(neg), 0.0) + 1e-10) / (np.sqrt(len(daily_return)) + 1e-10)
+        return tr, sharpe, vol, mdd, cr, sor
 
     def analysis_result(self):
-        # A simpler API for the environment to analysis itself when coming to terminal
         df_return = self.save_portfolio_return_memory()
-        daily_return = df_return.daily_return.values
         df_value = self.save_asset_memory()
-        assets = df_value["total assets"].values
-        df = pd.DataFrame()
-        df["daily_return"] = daily_return
-        df["total assets"] = assets
+        df = pd.DataFrame({
+            "daily_return": df_return["daily_return"].values,
+            "total assets": df_value["total assets"].values,
+        })
         return self.evaualte(df)
-
-    def get_daily_return_rate(self,price_list:list):
-        return_rate_list=[]
-        for i in range(len(price_list)-1):
-            return_rate=(price_list[i+1]/price_list[i])-1
-            return_rate_list.append(return_rate)
-        return return_rate_list
-        
-
-    def evaualte(self, df):
-        daily_return = df["daily_return"]
-        # print(df, df.shape, len(df),len(daily_return))
-        neg_ret_lst = df[df["daily_return"] < 0]["daily_return"]
-        tr = df["total assets"].values[-1] / (df["total assets"].values[0] + 1e-10) - 1
-        return_rate_list=self.get_daily_return_rate(df["total assets"].values)
-
-        sharpe_ratio = np.mean(return_rate_list)*(252)** 0.5 / (np.std(return_rate_list) + 1e-10)
-        vol = np.std(return_rate_list)
-        mdd = 0
-        peak=df["total assets"][0]
-        for value in df["total assets"]:
-            if value>peak:
-                peak=value
-            dd=(peak-value)/peak
-            if dd>mdd:
-                mdd=dd
-        cr = np.sum(daily_return) / (mdd + 1e-10)
-        sor = np.sum(daily_return) / (np.nan_to_num(np.std(neg_ret_lst),0) + 1e-10) / (np.sqrt(len(daily_return))+1e-10)
-        return tr, sharpe_ratio, vol, mdd, cr, sor
