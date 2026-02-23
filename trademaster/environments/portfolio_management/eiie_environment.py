@@ -45,6 +45,13 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.initial_amount = get_attr(self.dataset, "initial_amount", 100000)
         self.transaction_cost_pct = get_attr(self.dataset, "transaction_cost_pct", 0.001)
         self.fee_model = get_attr(self.dataset, "fee_model", None)
+        use_board_lot = get_attr(self.dataset, "use_board_lot", None)
+        if use_board_lot is None:
+            self.use_board_lot = self.fee_model == "pse"
+        elif isinstance(use_board_lot, str):
+            self.use_board_lot = use_board_lot.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            self.use_board_lot = bool(use_board_lot)
         self.trade_weight_threshold = float(get_attr(self.dataset, "trade_weight_threshold", 1e-3))
         self.trade_gross_threshold = float(get_attr(self.dataset, "trade_gross_threshold", 100.0))
         self.pse_commission_rate = float(get_attr(self.dataset, "pse_commission_rate", 0.0025))
@@ -117,6 +124,8 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.daily_trade_summary = OrderedDict()
         self.transaction_fee_detail_memory = []
         self.test_id = 'agent'
+        self.board_lot_memory = []
+        self.shares_memory = []
 
     def reset(self):
         """Reset environment to the initial day and rebuild the state window."""
@@ -145,6 +154,8 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.daily_trade_count = 0
         self.daily_trade_summary = OrderedDict()
         self.transaction_fee_detail_memory = []
+        self.board_lot_memory = []
+        self.shares_memory = []
 
         return self.state
 
@@ -213,7 +224,11 @@ class PortfolioManagementEIIEEnvironment(Environments):
 
             # self.state = np.transpose(self.state, (2, 0, 1))
             new_price_memory = self.df.loc[self.day, :]
-            # Price relative between today and yesterday (used for portfolio return)
+            # Price relative between today and yesterday (used for portfolio return).
+            if "close" not in new_price_memory.columns or "close" not in last_day_memory.columns:
+                raise KeyError(
+                    "Dataset must provide `close` for stable price-relative computation."
+                )
             price_rel = (
                 new_price_memory.close.values / last_day_memory.close.values
             )
@@ -272,6 +287,20 @@ class PortfolioManagementEIIEEnvironment(Environments):
                 weights_exec_assets = weights_exec_assets / (asset_sum + 1e-12)
                 cash = 0.0
             weights_exec = np.concatenate(([cash], weights_exec_assets))
+            
+            # Apply board-lot rounding only when enabled (PSE configs by default).
+            if self.use_board_lot:
+                if "close" not in new_price_memory.columns:
+                    raise KeyError(
+                        "Board-lot rounding requires a `close` column in the dataset."
+                    )
+                current_prices = new_price_memory.close.values
+                weights_exec, board_lot_diagnostics = self._apply_board_lot_rounding(
+                    weights_exec, current_prices, self.portfolio_value
+                )
+                self.board_lot_memory.append(board_lot_diagnostics)
+            
+            # Store executed weights after board-lot rounding
             self.executed_weights_memory.append(weights_exec.tolist())
             key = str(self.current_trade_date)
             if turnover > 0:
@@ -292,13 +321,14 @@ class PortfolioManagementEIIEEnvironment(Environments):
                 )
             else:
                 diff_weights = np.sum(
-                    np.abs(weights_exec_assets - weights_old_np[1:])
+                    np.abs(weights_exec[1:] - weights_old_np[1:])
                 )
                 transcationfee = (
                     diff_weights * self.transaction_cost_pct * self.portfolio_value
                 )
+            # Use executed weights after board-lot rounding for portfolio return
             portfolio_return = float(
-                np.sum((price_rel - 1) * weights_exec_assets)
+                np.sum((price_rel - 1) * weights_exec[1:])
             )
             new_portfolio_value = (self.portfolio_value -
                                    transcationfee) * (1 + portfolio_return)
@@ -308,8 +338,9 @@ class PortfolioManagementEIIEEnvironment(Environments):
                 self.portfolio_value)
             self.portfolio_value = new_portfolio_value
 
+            # Update weights for next period using executed weights after board-lot rounding
             weights_brandnew = self.normalization(
-                [cash] + list(weights_exec_assets * price_rel)
+                [weights_exec[0]] + list(weights_exec[1:] * price_rel)
             )
             self.weights_memory.append(weights_brandnew.tolist())
             self.portfolio_return_memory.append(portfolio_return)
@@ -317,6 +348,143 @@ class PortfolioManagementEIIEEnvironment(Environments):
             self.asset_memory.append(new_portfolio_value)
 
         return self.state, self.reward, self.terminal, {"weights_brandnew":weights_brandnew}
+
+    def _get_pse_board_lot(self, price: float) -> tuple[int, float]:
+        """
+        Get PSE board lot size and tick size based on price.
+        
+        Args:
+            price: Stock price in PHP
+            
+        Returns:
+            Tuple of (lot_size, tick_size) based on PSE trading rules.
+            
+        PSE Board Lot Table:
+        | Market Price (PHP) | Tick Size | Lot Size |
+        |-------------------|-----------|----------|
+        | 0.0001 - 0.0099   | 0.0001    | 1,000,000|
+        | 0.0500 - 0.2490   | 0.0010    | 10,000   |
+        | 0.2500 - 0.4950   | 0.0050    | 10,000   |
+        | 0.5000 - 4.9900   | 0.0100    | 1,000    |
+        | 5.000 - 9.990     | 0.0100    | 100      |
+        | 10.000 - 19.980   | 0.0200    | 100      |
+        | 20.000 - 49.950   | 0.0500    | 100      |
+        | 50.000 - 99.950   | 0.0500    | 10       |
+        | 100.000 - 199.900 | 0.1000    | 10       |
+        | 200.000 - 499.800 | 0.2000    | 10       |
+        | 500.000 - 999.500 | 0.5000    | 10       |
+        | 1000.000 - 1999.000| 1.0000   | 5        |
+        | 2000.000 - 4998.000| 2.0000   | 5        |
+        | 5000.000+         | 5.0000    | 5        |
+        """
+        if price < 0.0099:
+            return 1000000, 0.0001
+        elif price < 0.2490:
+            return 10000, 0.0010
+        elif price < 0.4950:
+            return 10000, 0.0050
+        elif price < 4.9900:
+            return 1000, 0.0100
+        elif price < 9.9900:
+            return 100, 0.0100
+        elif price < 19.9800:
+            return 100, 0.0200
+        elif price < 49.9500:
+            return 100, 0.0500
+        elif price < 99.9500:
+            return 10, 0.0500
+        elif price < 199.9000:
+            return 10, 0.1000
+        elif price < 499.8000:
+            return 10, 0.2000
+        elif price < 999.5000:
+            return 10, 0.5000
+        elif price < 1999.0000:
+            return 5, 1.0000
+        elif price < 4998.0000:
+            return 5, 2.0000
+        else:
+            return 5, 5.0000
+
+    def _apply_board_lot_rounding(
+        self,
+        weights: np.ndarray,
+        prices: np.ndarray,
+        portfolio_value: float,
+    ) -> tuple[np.ndarray, dict]:
+        """
+        Apply PSE board-lot rounding to convert weights to executable shares.
+        
+        This function:
+        1. Converts target weights to target shares using current prices
+        2. Rounds shares down to nearest board lot per ticker
+        3. Sets shares to 0 if below one lot
+        4. Converts rounded shares back to executed weights
+        
+        Args:
+            weights: Target portfolio weights including cash (length = stock_dim + 1)
+            prices: Current prices for each ticker (length = stock_dim)
+            portfolio_value: Current total portfolio value
+            
+        Returns:
+            Tuple of (executed_weights, diagnostics_dict)
+            - executed_weights: Normalized weights after board-lot rounding
+            - diagnostics_dict: Dictionary with board-lot impact metrics
+        """
+        cash_weight = weights[0]
+        asset_weights = weights[1:]
+        
+        # Convert weights to target values and shares
+        target_values = asset_weights * portfolio_value
+        target_shares = np.floor(target_values / (prices + 1e-12))
+        
+        # Apply board-lot rounding per ticker
+        rounded_shares = np.zeros_like(target_shares)
+        lot_sizes = np.zeros_like(target_shares)
+        tick_sizes = np.zeros_like(prices)
+        
+        for i, (price, shares) in enumerate(zip(prices, target_shares)):
+            lot_size, tick_size = self._get_pse_board_lot(price)
+            lot_sizes[i] = lot_size
+            tick_sizes[i] = tick_size
+            
+            # Round down to nearest board lot
+            if shares >= lot_size:
+                rounded_shares[i] = int(shares // lot_size) * lot_size
+            else:
+                rounded_shares[i] = 0.0
+        
+        # Convert rounded shares back to executed values
+        executed_values = rounded_shares * prices
+        executed_asset_value = float(np.sum(executed_values))
+        
+        # Cash is the residual
+        executed_cash = portfolio_value - executed_asset_value
+        
+        # Normalize to weights
+        if portfolio_value > 0:
+            executed_cash_weight = executed_cash / portfolio_value
+            executed_asset_weights = executed_values / portfolio_value
+        else:
+            executed_cash_weight = 1.0
+            executed_asset_weights = np.zeros_like(asset_weights)
+        
+        executed_weights = np.concatenate(([executed_cash_weight], executed_asset_weights))
+        
+        # Diagnostics
+        diagnostics = {
+            "target_shares": target_shares.tolist(),
+            "rounded_shares": rounded_shares.tolist(),
+            "lot_sizes": lot_sizes.tolist(),
+            "tick_sizes": tick_sizes.tolist(),
+            "target_values": target_values.tolist(),
+            "executed_values": executed_values.tolist(),
+            "shares_truncated": (target_shares - rounded_shares).tolist(),
+            "value_lost": float(np.sum((target_shares - rounded_shares) * prices)),
+            "tickers_below_lot": int(np.sum(target_shares > 0) - np.sum(rounded_shares > 0)),
+        }
+        
+        return executed_weights, diagnostics
 
     def _pse_transaction_fee(
         self,
@@ -409,6 +577,46 @@ class PortfolioManagementEIIEEnvironment(Environments):
         if not self.transaction_fee_detail_memory:
             return pd.DataFrame()
         return pd.DataFrame(self.transaction_fee_detail_memory)
+
+    def save_board_lot_memory(self):
+        """
+        Save board-lot diagnostics memory as a DataFrame.
+        
+        Returns:
+            DataFrame with board-lot impact metrics for each step.
+            Columns include:
+            - target_shares: Raw target shares before rounding
+            - rounded_shares: Executable shares after board-lot rounding
+            - lot_sizes: Board lot size for each ticker
+            - tick_sizes: Tick size for each ticker
+            - target_values: Target value before rounding
+            - executed_values: Executed value after rounding
+            - shares_truncated: Number of shares truncated by board-lot
+            - value_lost: Monetary value lost due to board-lot rounding
+            - tickers_below_lot: Number of tickers truncated to zero
+        """
+        if not self.board_lot_memory:
+            return pd.DataFrame()
+        
+        # Expand nested dictionaries into separate columns
+        records = []
+        for i, diag in enumerate(self.board_lot_memory):
+            record = {
+                "step": i,
+                "date": self.date_memory[i] if i < len(self.date_memory) else None,
+                "target_shares": str(diag["target_shares"]),
+                "rounded_shares": str(diag["rounded_shares"]),
+                "lot_sizes": str(diag["lot_sizes"]),
+                "tick_sizes": str(diag["tick_sizes"]),
+                "target_values": str(diag["target_values"]),
+                "executed_values": str(diag["executed_values"]),
+                "shares_truncated": str(diag["shares_truncated"]),
+                "value_lost": diag["value_lost"],
+                "tickers_below_lot": diag["tickers_below_lot"],
+            }
+            records.append(record)
+        
+        return pd.DataFrame(records)
 
     def normalization(self, actions):
         # a normalization function not only for actions to transfer into weights but also for the weights of the

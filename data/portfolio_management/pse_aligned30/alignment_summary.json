@@ -1,0 +1,162 @@
+{
+  "window": {
+    "start": "2008-03-19",
+    "end": "2025-11-28",
+    "valid_start": "2019-01-01",
+    "test_start": "2020-01-01",
+    "expected_tickers": 30,
+    "nyse_limiting_tickers": [
+      "V"
+    ],
+    "pse_limiting_tickers": [
+      "AC",
+      "AGI",
+      "ALI",
+      "AP",
+      "BDO",
+      "BLOOM",
+      "BPI",
+      "CNVRG",
+      "FB",
+      "FGEN",
+      "GLO",
+      "GTCAP",
+      "ICT",
+      "JFC",
+      "JGS",
+      "MBT",
+      "MEG",
+      "MER",
+      "MONDE",
+      "MYNLD",
+      "NIKL",
+      "PGOLD",
+      "RRHI",
+      "SCC",
+      "SECB",
+      "SM",
+      "SMPH",
+      "SPNEC",
+      "TEL",
+      "URC"
+    ]
+  },
+  "nyse": {
+    "train": {
+      "rows": 81480,
+      "tickers": 30,
+      "dates": 2716,
+      "start": "2008-03-19",
+      "end": "2018-12-31"
+    },
+    "valid": {
+      "rows": 7560,
+      "tickers": 30,
+      "dates": 252,
+      "start": "2019-01-02",
+      "end": "2019-12-31"
+    },
+    "test": {
+      "rows": 44580,
+      "tickers": 30,
+      "dates": 1486,
+      "start": "2020-01-02",
+      "end": "2025-11-28"
+    }
+  },
+  "pse": {
+    "train": {
+      "rows": 78840,
+      "tickers": 30,
+      "dates": 2628,
+      "start": "2008-03-19",
+      "end": "2018-12-28"
+    },
+    "valid": {
+      "rows": 7290,
+      "tickers": 30,
+      "dates": 243,
+      "start": "2019-01-02",
+      "end": "2019-12-27"
+    },
+    "test": {
+      "rows": 43500,
+      "tickers": 30,
+      "dates": 1450,
+      "start": "2020-01-02",
+      "end": "2025-11-28"
+    }
+  },
+  "nyse_tickers": [
+    "AMT",
+    "BA",
+    "BAC",
+    "C",
+    "CAT",
+    "CVX",
+    "DHR",
+    "DIS",
+    "GE",
+    "GS",
+    "HD",
+    "IBM",
+    "JNJ",
+    "JPM",
+    "KO",
+    "LIN",
+    "MCD",
+    "MMM",
+    "MRK",
+    "NEE",
+    "NKE",
+    "PFE",
+    "PG",
+    "RTX",
+    "SPGI",
+    "T",
+    "V",
+    "VZ",
+    "WMT",
+    "XOM"
+  ],
+  "pse_tickers": [
+    "AC",
+    "AGI",
+    "ALI",
+    "AP",
+    "BDO",
+    "BLOOM",
+    "BPI",
+    "CNVRG",
+    "FB",
+    "FGEN",
+    "GLO",
+    "GTCAP",
+    "ICT",
+    "JFC",
+    "JGS",
+    "MBT",
+    "MEG",
+    "MER",
+    "MONDE",
+    "MYNLD",
+    "NIKL",
+    "PGOLD",
+    "RRHI",
+    "SCC",
+    "SECB",
+    "SM",
+    "SMPH",
+    "SPNEC",
+    "TEL",
+    "URC"
+  ],
+  "sources": {
+    "nyse_source": "/mnt/lustre/erdtlstr/home/laperia/archive/trademaster_nyse_20251207/nyse_custom_splits",
+    "pse_source": "/mnt/lustre/erdtlstr/home/laperia/TradeMaster/data/portfolio_management/pse"
+  },
+  "outputs": {
+    "nyse_output": "/mnt/lustre/erdtlstr/home/laperia/TradeMaster/data/portfolio_management/nyse_ohlc_aligned30",
+    "pse_output": "/mnt/lustre/erdtlstr/home/laperia/TradeMaster/data/portfolio_management/pse_aligned30"
+  }
+}
