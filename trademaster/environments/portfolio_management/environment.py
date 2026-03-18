@@ -274,7 +274,7 @@ class PortfolioManagementEnvironment(Environments):
 
         neg = daily_return[daily_return < 0]
         cr = np.sum(daily_return) / (mdd + 1e-10)
-        sor = np.sum(daily_return) / (np.nan_to_num(np.std(neg), 0.0) + 1e-10) / (np.sqrt(len(daily_return)) + 1e-10)
+        sor = np.sum(daily_return) / (np.nan_to_num(np.std(neg), nan=0.0) + 1e-10) / (np.sqrt(len(daily_return)) + 1e-10)
         return tr, sharpe, vol, mdd, cr, sor
 
     def analysis_result(self):

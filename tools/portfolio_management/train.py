@@ -54,8 +54,13 @@ def main():
     # Work dir (absolute)
     work_dir = osp.join(ROOT, cfg.trainer.work_dir)
     os.makedirs(work_dir, exist_ok=True)
-    # Save the resolved config alongside the run
-    cfg.dump(osp.join(work_dir, osp.basename(args.config)))
+    # Save the resolved config alongside the run (tolerate older yapf/FormatCode APIs)
+    cfg_path = osp.join(work_dir, osp.basename(args.config))
+    try:
+        cfg.dump(cfg_path)
+    except TypeError:
+        with open(cfg_path, "w") as fh:
+            fh.write(cfg.pretty_text)
 
     # Build trainer (passes dataset + device into trainer ctor)
     trainer = build_trainer(cfg, default_args=dict(dataset=dataset, device=device))

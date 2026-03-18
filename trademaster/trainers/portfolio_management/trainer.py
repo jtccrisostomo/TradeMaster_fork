@@ -1,4 +1,42 @@
 from typing import Optional
+from enum import Enum
+import types
+import sys
+import gymnasium as gym
+# Also cover legacy gym import path used inside some RLlib builds
+try:
+    import gym as gym_legacy  # noqa: F401
+except Exception:
+    gym_legacy = None
+
+# RLlib expects gymnasium.envs.registration.VectorizeMode (or gym.envs.registration.VectorizeMode)
+# with __members__. Patch both modules with a minimal Enum if missing.
+def _ensure_vectorize_mode(mod):
+    if mod is None:
+        return
+    reg = getattr(mod, "envs", None)
+    if reg and hasattr(reg, "registration") and not hasattr(reg.registration, "VectorizeMode"):
+        reg.registration.VectorizeMode = Enum(
+            "VectorizeMode",
+            {"NONE": "none", "SYNC": "sync", "ASYNC": "async"},
+        )
+
+_ensure_vectorize_mode(gym)
+_ensure_vectorize_mode(gym_legacy)
+
+# RLlib >=2.6 may import gymnasium.wrappers.vector.DictInfoToList; older gymnasium lacks it.
+try:
+    from gymnasium.wrappers.vector import DictInfoToList  # noqa: F401
+except Exception:
+    vw = types.ModuleType("gymnasium.wrappers.vector")
+    class DictInfoToList:
+        def __init__(self, env):
+            self.env = env
+        def __getattr__(self, name):
+            return getattr(self.env, name)
+    vw.DictInfoToList = DictInfoToList
+    sys.modules["gymnasium.wrappers.vector"] = vw
+
 try:
     from gymnasium.wrappers import EnvCompatibility
 except Exception:  # gymnasium >=1.2 may drop EnvCompatibility; fall back to identity
@@ -156,6 +194,9 @@ class PortfolioManagementTrainer(Trainer):
         # Env checker can be overzealous; we wrap with EnvCompatibility, but also disable checks to be safe.
         self.configs["disable_env_checking"] = True
         self.configs.setdefault("framework", "torch")
+        # Force single-env (non-vectorized) mode to bypass missing VectorizeMode support in older gymnasium
+        self.configs["num_envs_per_worker"] = 1
+        self.configs["gym_env_vectorize_mode"] = "none"
 
         self.init_before_training()
 
