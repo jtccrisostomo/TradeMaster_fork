@@ -110,14 +110,18 @@ class PortfolioManagementEIIETrainer(Trainer):
         '''init agent.last_state'''
         state = self.train_environment.reset()
         if self.num_envs == 1:
-            assert state.shape == (self.action_dim, self.time_steps, self.state_dim,)
+            expected = (self.action_dim, self.time_steps, self.state_dim,)
+            if state.shape != expected:
+                raise AssertionError(f"state.shape={state.shape}, expected={expected}")
             assert isinstance(state, np.ndarray)
             state = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         else:
             assert state.shape == (self.num_envs, self.state_dim)
             assert isinstance(state, torch.Tensor)
             state = state.to(self.device)
-        assert state.shape == (self.num_envs, self.action_dim, self.time_steps, self.state_dim,)
+        expected = (self.num_envs, self.action_dim, self.time_steps, self.state_dim,)
+        if state.shape != expected:
+            raise AssertionError(f"state.shape={state.shape}, expected={expected}")
         assert isinstance(state, torch.Tensor)
         self.agent.last_state = state.detach()
 
