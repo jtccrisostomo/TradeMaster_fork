@@ -6807,3 +6807,7 @@ pm/__init__.py
 pm/
 .gitignore
 slurm_logs/tm-eiie-batch-60747.err
+
+# Experiment artifacts (heavy)
+EXPERIMENT_RESULTS/**/work_dir/
+EXPERIMENT_RESULTS/**/slurm_logs/
